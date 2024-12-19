@@ -17,7 +17,7 @@ def main():
     Nx = 100000
 
     block_dim = (128,)
-    stride = (64,)
+    stride = (2,)
 
     ### Triton Version ###
     def random_unfold_triton():

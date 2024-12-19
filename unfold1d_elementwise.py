@@ -61,7 +61,7 @@ def unfold(
             *block_size,
             *im_size,
             *stride,
-            X_BLOCK_SIZE=128,
+            X_BLOCK_SIZE=X_BLOCK_SIZE,
         )
 
     # Reshape and return
