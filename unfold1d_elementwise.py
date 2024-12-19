@@ -46,7 +46,13 @@ def unfold(
             device=x.device,
             dtype=x.dtype,
         )
-        grid = (triton.cdiv(n_batch * prod(nblocks), 1),)
+        # grid = (triton.cdiv(n_batch * prod(nblocks), 1),)
+        # n_blocks_per_block = X_BLOCK_SIZE // block_size
+        # num grids to launch = ceil(nblocks/ n_blocks_per_block
+        grid = lambda meta: (
+            n_batch * triton.cdiv(nblocks[0], meta["x_blocks_per_block"]),
+        )
+        X_BLOCK_SIZE = triton.next_power_of_2(block_size[0])
         UNFOLD[ndim][grid](
             x,
             y,
@@ -55,46 +61,8 @@ def unfold(
             *block_size,
             *im_size,
             *stride,
-            X_BLOCK_SIZE=8,
+            X_BLOCK_SIZE=128,
         )
-
-    # Reshape and return
-    return y.reshape(*x_batch_shape, *nblocks, *block_size)
-
-
-def fold(
-    x,
-    block_size: tuple,
-    stride: tuple,
-):
-    """Cube-like unfolding"""
-    # Infer some shapes
-    ndim = len(block_size)
-    im_size = x.shape[-ndim:]
-    stride = stride if stride is not None else (1,) * ndim
-    nblocks = get_nblocks(im_size, block_size, stride)
-
-    # Add or infer batch dim
-    x_batch_shape = x.shape[-ndim:]
-    if ndim < len(x.shape):
-        x = x.flatten(0, len(x.shape) - ndim - 1)
-    else:
-        x = x[None]
-
-    n_batch = x.shape[0]
-
-    # Call kernel
-    y = torch.zeros(n_batch, *nblocks, *block_size)
-    grid = (triton.cdiv(n_batch * prod(nblocks) * prod(block_size), 1),)
-    FOLD[ndim][grid](
-        x,
-        y,
-        n_batch,
-        *nblocks,
-        *block_size,
-        *im_size,
-        *stride,
-    )
 
     # Reshape and return
     return y.reshape(*x_batch_shape, *nblocks, *block_size)
@@ -102,11 +70,74 @@ def fold(
 
 def get_configs():
     warps = [1, 2, 4, 8, 16]
-    block_sizes = [1, 2, 4, 8, 16]
+    stages = [1, 2, 3, 4, 5]
+    block_sizes = [2**i for i in range(8)]
     return [
-        triton.Config({"X_BLOCK_SIZE": block_size}, num_warps=warp)
-        for (block_size, warp) in product(block_sizes, warps)
+        triton.Config(
+            {"x_blocks_per_block": block_size}, num_warps=warp, num_stages=stages
+        )
+        for (block_size, warp, stages) in product(block_sizes, warps, stages)
     ]
+
+
+@triton.autotune(
+    configs=get_configs(),
+    key=["x_block_dim", "x_size"],
+)
+@triton.jit
+def _unfold1d(
+    in_ptr,
+    out_ptr,
+    # Number of batches
+    n_batch: int,
+    # Number of blocks
+    x_nblocks: int,
+    # Size of each block
+    x_block_dim: int,
+    # Size of the input data
+    x_size: int,
+    # Stride of the blocks
+    x_stride: int,
+    x_blocks_per_block: int,
+    # Size of the triton block (power of 2)
+    X_BLOCK_SIZE: tl.constexpr,
+):
+    # x_blocks_per_block = X_BLOCK_SIZE // x_block_dim
+
+    pid_0 = tl.program_id(0)
+    # Batch index, Block index
+    NBx = pid_0 * x_blocks_per_block
+    N, Bx = NBx // x_nblocks, NBx % x_nblocks
+
+    # Get block from input
+    # x_load_range = tl.arange(0, X_BLOCK_SIZE)
+    # x_load_mask = x_load_range < x_size
+    # load_range = x_load_range
+    # load_mask = x_load_mask
+    # size = x_size
+    in_offset = N * x_size + Bx * x_stride
+
+    in_blk_ptr = tl.make_block_ptr(
+        in_ptr + in_offset,
+        shape=(n_batch, x_size),
+        strides=(1, 1),
+        offsets=(0, 0),
+        block_shape=(1, X_BLOCK_SIZE),
+        order=(0, 1),
+    )
+    blk_range = tl.arange(0, X_BLOCK_SIZE)
+    blk_mask = blk_range < x_block_dim
+    # out_offset = N * x_nblocks * x_block_dim + Bx * x_block_dim
+
+    for i in range(x_blocks_per_block):
+        if Bx + i < x_nblocks:
+            blk = tl.load(in_blk_ptr)
+            # Save block to output
+            out_offset = N * x_nblocks * x_block_dim + (Bx + i) * x_block_dim
+            out_range = blk_range[None, :]
+            out_mask = blk_mask[None, :]
+            tl.store(out_ptr + out_offset + out_range, blk, out_mask)
+        in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride))
 
 
 # @triton.autotune(
@@ -114,7 +145,7 @@ def get_configs():
 #     key=["x_nblocks", "x_block_dim", "x_size", "x_stride"],
 # )
 @triton.jit
-def _unfold1d_blocked_output(
+def _unfold1d_blockwise(
     in_ptr,
     out_ptr,
     # Number of batches

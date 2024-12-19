@@ -1,6 +1,6 @@
 import torch
 
-from unfold1d_elementwise import unfold, fold
+from unfold1d_elementwise import unfold
 from unfold_native import unfold_torch
 import sigpy as sp
 import cupy as cp
@@ -13,18 +13,19 @@ from utils import from_pytorch, to_pytorch
 
 def main():
     device = torch.device("cuda:0")
-    N = 9
-    Nx = 40000
+    N = 1
+    Nx = 100000
 
-    block_dim = (16,)
-    stride = (1,)
+    block_dim = (128,)
+    stride = (64,)
 
     ### Triton Version ###
     def random_unfold_triton():
-        x = torch.randn((N, Nx), device=device)
+        x = torch.arange(N * Nx, device=device).reshape(N, Nx)
+        # x = torch.randn((N, Nx), device=device)
         return unfold(x, block_dim, stride)
 
-    triton_res, _ = benchmark(random_unfold_triton)
+    triton_res, _ = benchmark(random_unfold_triton, num_iters=100)
     summarize(triton_res, "triton")
 
     ### torch.compile Version ###
@@ -47,7 +48,7 @@ def main():
             x = xp.random.randn(N, Nx)
             return sp.array_to_blocks(x, block_dim, stride)
 
-    sp_res, _ = benchmark(random_unfold_sp)
+    sp_res, _ = benchmark(random_unfold_sp, num_iters=100)
     summarize(sp_res, "sp")
 
     # Test correctness
@@ -65,6 +66,7 @@ def summarize(benchmark_result, name: str):
             indent.print(
                 f"Mean Time: {np.mean(benchmark_result['timings_ms']):0.3f} ms"
             )
+            indent.print(f"Min Time: {np.min(benchmark_result['timings_ms']):0.3f} ms")
             indent.print(f"Max Time: {np.max(benchmark_result['timings_ms']):0.3f} ms")
             indent.print(f"Memory: {benchmark_result['max_mem_bytes']} bytes")
 
