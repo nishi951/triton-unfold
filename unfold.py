@@ -65,6 +65,9 @@ def _unfold(
             BLOCK_SIZE = tuple(
                 triton.next_power_of_2(blk_size) for blk_size in block_size
             )
+            # DEBUG
+            # grid = (nblocks[0], nblocks[1])
+
             UNFOLD[ndim][grid](
                 x,
                 y,
@@ -74,6 +77,8 @@ def _unfold(
                 *im_size,
                 *stride,
                 *BLOCK_SIZE,
+                # x_blocks_per_grid=1,
+                # y_blocks_per_grid=1,
             )
     else:
         y = _unfold_torch(x)
@@ -101,22 +106,173 @@ def _get_grid(ndim: int, nbatch, nblocks: tuple[int, ...]):
     return grid
 
 
-def get_configs():
-    warps = [1, 2, 4, 8, 16]
-    stages = [1, 2, 3, 4, 5]
-    blocks_per_grid = [2**i for i in range(8)]
+def _get_configs(ndim: int):
+    warps = [1, 2]
+    stages = [1, 2]
+    blocks_per_grid = [[2**i for i in range(4)] for _ in range(ndim)]
+    bpg_iter = product(*blocks_per_grid)
     return [
-        triton.Config({"x_blocks_per_grid": bpg}, num_warps=warp, num_stages=stages)
-        for (bpg, warp, stages) in product(blocks_per_grid, warps, stages)
+        triton.Config(kwargs=_bpg2dict(*bpg), num_warps=warp, num_stages=stages)
+        for (bpg, warp, stages) in product(bpg_iter, warps, stages)
     ]
 
 
+def _bpg2dict(*bpg):
+    out = {}
+    for b, n in zip(bpg, ["x", "y", "z"][: len(bpg)]):
+        out[f"{n}_blocks_per_grid"] = b
+    return out
+
+
 @triton.autotune(
-    configs=get_configs(),
+    configs=_get_configs(ndim=1),
     key=["x_block_dim", "x_size"],
 )
 @triton.jit
 def _unfold1d(
+    in_ptr,
+    out_ptr,
+    # Number of batches
+    nbatch: int,
+    # Number of blocks
+    x_nblocks: int,
+    # Size of each block
+    x_block_dim: int,
+    # Size of the input data
+    x_size: int,
+    # Stride of the blocks
+    x_stride: int,
+    # Size of the triton block (power of 2)
+    X_BLOCK_SIZE: tl.constexpr,
+    # Number of blocks per grid pid
+    x_blocks_per_grid: int,
+):
+    pid_0 = tl.program_id(0)
+    # Batch index, Block index
+    NBx = pid_0 * x_blocks_per_grid
+    N, Bx = NBx // x_nblocks, NBx % x_nblocks
+
+    in_size = x_size
+    nblocks = x_nblocks
+    block_dim = x_block_dim
+    # Get block from input
+    # x_load_range = tl.arange(0, X_BLOCK_SIZE)
+    # x_load_mask = x_load_range < x_size
+    # load_range = x_load_range
+    # load_mask = x_load_mask
+    # size = x_size
+    # in_offset = N * x_size + Bx * x_stride
+
+    in_blk_ptr = tl.make_block_ptr(
+        in_ptr,
+        shape=(nbatch, x_size),
+        strides=(in_size, 1),
+        offsets=(N, Bx * x_stride),
+        block_shape=(1, X_BLOCK_SIZE),
+        order=(0, 1),
+    )
+    x_range = tl.arange(0, X_BLOCK_SIZE)
+    x_mask = x_range < x_block_dim
+    blk_range = x_range
+    blk_mask = x_mask
+    # out_offset = N * x_nblocks * x_block_dim + Bx * x_block_dim
+    out_range = blk_range[None, :]
+    out_mask = blk_mask[None, :]
+
+    for i in range(x_blocks_per_grid):
+        if Bx + i < x_nblocks:
+            blk = tl.load(in_blk_ptr)
+            # Save block to output
+            out_offset = N * nblocks * block_dim + (Bx + i) * block_dim
+            tl.store(out_ptr + out_offset + out_range, blk, out_mask)
+        in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride))
+
+
+@triton.autotune(
+    configs=_get_configs(ndim=2),
+    key=["x_block_dim", "x_size", "y_block_dim", "y_size"],
+)
+@triton.jit
+def _unfold2d(
+    in_ptr,
+    out_ptr,
+    # Number of batches
+    nbatch: int,
+    # Number of blocks
+    x_nblocks: int,
+    y_nblocks: int,
+    # Size of each block
+    x_block_dim: int,
+    y_block_dim: int,
+    # Size of the input data
+    x_size: int,
+    y_size: int,
+    # Stride of the blocks
+    x_stride: int,
+    y_stride: int,
+    # Size of the triton block (power of 2)
+    X_BLOCK_SIZE: tl.constexpr,
+    Y_BLOCK_SIZE: tl.constexpr,
+    # Number of blocks per grid pid
+    x_blocks_per_grid: int,
+    y_blocks_per_grid: int,
+):
+    pid_0 = tl.program_id(0)
+    pid_1 = tl.program_id(1)
+    # Batch index, Block index
+    N = 0
+    NBx = pid_0 * x_blocks_per_grid
+    N, Bx = NBx // x_nblocks, NBx % x_nblocks
+    By = pid_1 * y_blocks_per_grid
+
+    # global sizes
+    in_size = x_size * y_size
+    nblocks = x_nblocks * y_nblocks
+    block_dim = x_block_dim * y_block_dim
+
+    # Get block from input
+    # in_offset = N * in_size + Bx * x_stride * y_size + By * y_stride
+
+    in_blk_ptr = tl.make_block_ptr(
+        in_ptr,
+        shape=(nbatch, x_size, y_size),
+        strides=(in_size, y_size, 1),
+        offsets=(N, Bx * x_stride, By * y_stride),
+        block_shape=(1, X_BLOCK_SIZE, Y_BLOCK_SIZE),
+        order=(0, 1, 2),
+    )
+    x_range = tl.arange(0, X_BLOCK_SIZE)
+    y_range = tl.arange(0, Y_BLOCK_SIZE)
+    x_mask = x_range < x_block_dim
+    y_mask = y_range < y_block_dim
+    blk_range = x_range[:, None] * y_block_dim + y_range[None, :]
+    blk_mask = x_mask[:, None] & y_mask[None, :]
+    # out_offset = N * x_nblocks * x_block_dim + Bx * x_block_dim
+    # add batch dim
+    out_range = blk_range[None, :, :]
+    out_mask = blk_mask[None, :, :]
+
+    for i in range(x_blocks_per_grid):
+        if Bx + i < x_nblocks:
+            x_blk_offset = (Bx + i) * y_nblocks * block_dim
+            in_blk_ptr_x = in_blk_ptr
+            for j in range(y_blocks_per_grid):
+                if By + j < y_nblocks:
+                    y_blk_offset = (By + j) * block_dim
+                    blk = tl.load(in_blk_ptr)
+                    out_offset = N * nblocks * block_dim + x_blk_offset + y_blk_offset
+                    tl.store(out_ptr + out_offset + out_range, blk, out_mask)
+                in_blk_ptr = tl.advance(in_blk_ptr, (0, 0, y_stride))
+            in_blk_ptr = in_blk_ptr_x
+        in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride, 0))
+
+
+@triton.autotune(
+    configs=_get_configs(ndim=3),
+    key=["x_block_dim", "x_size"],
+)
+@triton.jit
+def _unfold3d(
     in_ptr,
     out_ptr,
     # Number of batches
@@ -170,7 +326,7 @@ def _unfold1d(
         in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride))
 
 
-UNFOLD = {1: _unfold1d}
+UNFOLD = {1: _unfold1d, 2: _unfold2d}
 
 
 @torch.compile
