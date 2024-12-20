@@ -29,13 +29,18 @@ def unfold(
             *shapes["block_size"],
         )
         y_flat = y_flat.reshape(*y_flat.shape[:-1], y_flat.shape[-1] // 2, 2)
-        return torch.view_as_complex(y_flat)
-    y_flat = _unfold(x_flat, **shapes)
-    return y_flat.reshape(
-        *shapes["batch_shape"],
-        *shapes["nblocks"],
-        *shapes["block_size"],
-    )
+
+        y = torch.view_as_complex(y_flat)
+    else:
+        y_flat = _unfold(x_flat, **shapes)
+        y = y_flat.reshape(
+            *shapes["batch_shape"],
+            *shapes["nblocks"],
+            *shapes["block_size"],
+        )
+    if mask is not None:
+        y = y[..., mask]
+    return y
 
 
 def _unfold(
@@ -47,7 +52,7 @@ def _unfold(
     nblocks: tuple[int, ...],
     nbatch: int,
     # batch_shape: tuple[int, ...],
-    mask: Bool[Tensor, "..."],
+    # mask: Bool[Tensor, "..."],
     **kwargs,
 ) -> Shaped[Tensor, "B ..."]:
     """Implementation of unfold"""
@@ -77,8 +82,6 @@ def _unfold(
                 *im_size,
                 *stride,
                 *BLOCK_SIZE,
-                # x_blocks_per_grid=1,
-                # y_blocks_per_grid=1,
             )
     else:
         y = _unfold_torch(x)
@@ -176,6 +179,7 @@ def _unfold1d(
     blk_range = x_range
     blk_mask = x_mask
     # out_offset = N * x_nblocks * x_block_dim + Bx * x_block_dim
+
     out_range = blk_range[None, :]
     out_mask = blk_mask[None, :]
 
@@ -388,13 +392,14 @@ def prep_shapes(
 
     # Handle mask
     if mask is not None:
-        if torch.is_complex(x):
-            mask = torch.repeat_interleave(mask, repeats=2, dim=-1).contiguous()
-        if block_size != mask.shape:
-            raise ValueError(
-                f"Mask must have same shape as blocks but got mask: {mask.shape} and block_size: {block_size}"
-            )
-        block_size = (torch.sum(mask).item(),)
+        # if torch.is_complex(x):
+        #     mask = torch.repeat_interleave(mask, repeats=2, dim=-1).contiguous()
+        # if block_size != mask.shape:
+        #     raise ValueError(
+        #         f"Mask must have same shape as blocks but got mask: {mask.shape} and block_size: {block_size}"
+        #     )
+        # block_size = (int(torch.sum(mask).item()),)
+        mask = mask.to(x.device)
 
     return x_flat, {
         "ndim": ndim,

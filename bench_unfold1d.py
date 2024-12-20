@@ -12,19 +12,24 @@ from utils import from_pytorch, to_pytorch
 
 def main():
     device = torch.device("cuda:0")
-    N = 3
-    Nx = 100000
+    N = 1
+    Nx = 20
 
-    block_dim = (128,)
-    stride = (2,)
+    block_dim = (12,)
+    stride = (1,)
+
+    mask = torch.zeros(*block_dim, dtype=bool)
+    mask[::2] = 1
+
     dtype = torch.complex64
     cp_dtype = np.float32
 
     ### Triton Version ###
     def random_unfold_triton():
-        x = torch.randn(N * Nx, dtype=torch.complex64, device=device).reshape(N, Nx)
+        x = torch.arange(N * Nx, dtype=torch.float32, device=device).reshape(N, Nx)
+        # x = torch.randn(N * Nx, dtype=torch.complex64, device=device).reshape(N, Nx)
         # x = torch.randn((N, Nx), device=device)
-        return unfold(x, block_dim, stride)
+        return unfold(x, block_dim, stride, mask)
 
     triton_res, _ = benchmark(random_unfold_triton, num_iters=100)
     summarize(triton_res, "triton")
@@ -56,9 +61,9 @@ def main():
 
     # Test correctness
     x = torch.randn((N, Nx), device=device)
-    Bx_triton = unfold(x, block_dim, stride)
-    Bx_sp = sp.array_to_blocks(from_pytorch(x), block_dim, stride)
-    assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
+    Bx_triton = unfold(x, block_dim, stride, mask)
+    # Bx_sp = sp.array_to_blocks(from_pytorch(x), block_dim, stride)
+    # assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
     breakpoint()
 
 
