@@ -1,7 +1,6 @@
 import torch
 
-from unfold1d_elementwise import unfold
-from unfold_native import unfold_torch
+from unfold import unfold
 import sigpy as sp
 import cupy as cp
 import numpy as np
