@@ -21,11 +21,16 @@ def unfold(
     """Wrapper that dispatches complex and real tensors"""
     x_flat, shapes = prep_shapes(x, block_size, stride, mask)
     if torch.is_complex(x_flat):
-        real = _unfold(x_flat, **shapes)
-        imag = _unfold(x_flat, **shapes)
-        y_flat = real + 1j * imag
-    else:
+        x_flat = torch.view_as_real(x_flat)
         y_flat = _unfold(x_flat, **shapes)
+        y_flat = y_flat.reshape(
+            *shapes["batch_shape"],
+            *shapes["nblocks"],
+            *shapes["block_size"],
+        )
+        y_flat = y_flat.reshape(*y_flat.shape[:-1], y_flat.shape[-1] // 2, 2)
+        return torch.view_as_complex(y_flat)
+    y_flat = _unfold(x_flat, **shapes)
     return y_flat.reshape(
         *shapes["batch_shape"],
         *shapes["nblocks"],
@@ -208,6 +213,13 @@ def prep_shapes(
     ndim = len(block_size)
     im_size = x.shape[-ndim:]
     stride = stride if stride is not None else (1,) * ndim
+
+    if torch.is_complex(x):
+        block_size = list(block_size)
+        block_size[-1] *= 2
+        stride = list(stride)
+        stride[-1] *= 2
+
     nblocks = get_nblocks(im_size, block_size, stride)
 
     # Add or infer batch dim
@@ -220,6 +232,8 @@ def prep_shapes(
 
     # Handle mask
     if mask is not None:
+        if torch.is_complex(x):
+            mask = torch.repeat_interleave(mask, repeats=2, dim=-1).contiguous()
         if block_size != mask.shape:
             raise ValueError(
                 f"Mask must have same shape as blocks but got mask: {mask.shape} and block_size: {block_size}"

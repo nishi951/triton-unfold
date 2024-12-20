@@ -17,10 +17,12 @@ def main():
 
     block_dim = (128,)
     stride = (2,)
+    dtype = torch.complex64
+    cp_dtype = np.float32
 
     ### Triton Version ###
     def random_unfold_triton():
-        x = torch.arange(N * Nx, device=device).reshape(N, Nx)
+        x = torch.randn(N * Nx, dtype=torch.complex64, device=device).reshape(N, Nx)
         # x = torch.randn((N, Nx), device=device)
         return unfold(x, block_dim, stride)
 
@@ -44,7 +46,9 @@ def main():
         # x = from_pytorch(x)
         xp = dev.xp
         with dev:
-            x = xp.random.randn(N, Nx)
+            x = xp.random.randn(N, Nx, dtype=cp_dtype) + 1j * xp.random.randn(
+                N, Nx, dtype=cp_dtype
+            )
             return sp.array_to_blocks(x, block_dim, stride)
 
     sp_res, _ = benchmark(random_unfold_sp, num_iters=100)
