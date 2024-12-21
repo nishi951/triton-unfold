@@ -1,6 +1,7 @@
 import torch
+from math import prod
 
-from unfold import unfold
+from fold import fold
 import sigpy as sp
 import cupy as cp
 import numpy as np
@@ -9,28 +10,37 @@ from utils.benchmark import benchmark
 from utils import Indenter, device_ordinal
 from utils import from_pytorch, to_pytorch
 
+from nblocks import get_nblocks
+
 
 def main():
     device = torch.device("cuda:0")
     N = 2
     Nx = 100
-    Ny = 200
 
-    block_dim = (11, 12)
-    stride = (1, 2)
+    im_size = (Nx,)
+
+    block_dim = (4,)
+    stride = (2,)
+
+    nblocks = get_nblocks((Nx,), block_dim, stride)
+    # mask = torch.zeros(*block_dim, dtype=bool)
+    # mask[::2] = 1
+    mask = None
+
     dtype = torch.complex64
-    cp_complex: bool = True
-
-    mask = torch.zeros(*block_dim, dtype=bool)
-    mask[::2, ::2] = 1
+    cp_dtype = np.float32
 
     ### Triton Version ###
-    def random_unfold_triton():
-        x = torch.randn(N * Nx * Ny, dtype=dtype, device=device).reshape(N, Nx, Ny)
+    def random_fold_triton():
+        x = torch.arange(
+            N * prod(nblocks) * prod(block_dim), dtype=torch.float32, device=device
+        ).reshape(N, *nblocks, *block_dim)
+        # x = torch.randn(N * Nx, dtype=torch.complex64, device=device).reshape(N, Nx)
         # x = torch.randn((N, Nx), device=device)
-        return unfold(x, block_dim, stride)
+        return fold(x, im_size, block_dim, stride, mask)
 
-    triton_res, _ = benchmark(random_unfold_triton, num_iters=100)
+    triton_res, _ = benchmark(random_fold_triton, num_iters=100)
     summarize(triton_res, "triton")
 
     ### torch.compile Version ###
@@ -45,27 +55,24 @@ def main():
     ### Cupy Version ###
     dev = sp.Device(device_ordinal(device))
 
-    def random_unfold_sp():
+    def random_fold_sp():
         # x = torch.randn((N, Nx), device=device)
         # x = from_pytorch(x)
         xp = dev.xp
         with dev:
-            if cp_complex:
-                x = xp.random.randn(N, Nx, Ny, dtype=np.float32) + 1j * xp.random.randn(
-                    N, Nx, Ny, dtype=np.float32
-                )
-            else:
-                x = xp.random.randn(N, Nx, Ny)
-            return sp.array_to_blocks(x, block_dim, stride)
+            x = xp.random.randn(
+                N, *nblocks, *block_dim, dtype=cp_dtype
+            ) + 1j * xp.random.randn(N, *nblocks, *block_dim, dtype=cp_dtype)
+            return sp.blocks_to_array(x, (N, *im_size), block_dim, stride)
 
-    sp_res, _ = benchmark(random_unfold_sp, num_iters=100)
+    sp_res, _ = benchmark(random_fold_sp, num_iters=100)
     summarize(sp_res, "sp")
 
     # Test correctness
-    x = torch.randn((N, Nx, Ny), device=device)
-    Bx_triton = unfold(x, block_dim, stride, mask)
-    # Bx_sp = sp.array_to_blocks(from_pytorch(x), block_dim, stride)
-    # assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
+    x = torch.randn((N, *nblocks, *block_dim), device=device)
+    Bx_triton = fold(x, im_size, block_dim, stride, mask)
+    Bx_sp = sp.blocks_to_array(from_pytorch(x), (N, *im_size), block_dim, stride)
+    assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
     breakpoint()
 
 

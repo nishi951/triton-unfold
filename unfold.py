@@ -9,6 +9,8 @@ import triton
 import triton.language as tl
 import torch
 
+from nblocks import get_nblocks
+
 __all__ = ["unfold"]
 
 
@@ -19,18 +21,17 @@ def unfold(
     mask: Optional[Bool[Tensor, "..."]] = None,
 ) -> Tensor:
     """Wrapper that dispatches complex and real tensors"""
-    x_flat, shapes = prep_shapes(x, block_size, stride, mask)
+    x_flat, shapes = prep_unfold_shapes(x, block_size, stride, mask)
     if torch.is_complex(x_flat):
         x_flat = torch.view_as_real(x_flat)
         y_flat = _unfold(x_flat, **shapes)
-        y_flat = y_flat.reshape(
+        y = y_flat.reshape(
             *shapes["batch_shape"],
             *shapes["nblocks"],
             *shapes["block_size"],
         )
-        y_flat = y_flat.reshape(*y_flat.shape[:-1], y_flat.shape[-1] // 2, 2)
-
-        y = torch.view_as_complex(y_flat)
+        y = y.reshape(*y.shape[:-1], y.shape[-1] // 2, 2)
+        y = torch.view_as_complex(y)
     else:
         y_flat = _unfold(x_flat, **shapes)
         y = y_flat.reshape(
@@ -45,7 +46,7 @@ def unfold(
 
 def _unfold(
     x: Shaped[Tensor, "B ..."],
-    block_size: tuple[int],
+    block_size: tuple[int, ...],
     stride: tuple[int, ...],
     ndim: int,
     im_size: tuple[int, ...],
@@ -84,7 +85,7 @@ def _unfold(
                 *BLOCK_SIZE,
             )
     else:
-        y = _unfold_torch(x)
+        y = _unfold_torch(x, **shapes)
     return y
 
 
@@ -129,7 +130,7 @@ def _bpg2dict(*bpg):
 
 @triton.autotune(
     configs=_get_configs(ndim=1),
-    key=["x_block_dim", "x_size"],
+    key=["x_block_dim", "x_size", "x_stride"],
 )
 @triton.jit
 def _unfold1d(
@@ -150,6 +151,10 @@ def _unfold1d(
     # Number of blocks per grid pid
     x_blocks_per_grid: int,
 ):
+    """
+    Note: Cannot use make_block_ptr for out_ptr because the output block
+    might require masking.
+    """
     pid_0 = tl.program_id(0)
     # Batch index, Block index
     NBx = pid_0 * x_blocks_per_grid
@@ -194,7 +199,14 @@ def _unfold1d(
 
 @triton.autotune(
     configs=_get_configs(ndim=2),
-    key=["x_block_dim", "x_size", "y_block_dim", "y_size"],
+    key=[
+        "x_block_dim",
+        "x_size",
+        "x_stride",
+        "y_block_dim",
+        "y_size",
+        "y_stride",
+    ],
 )
 @triton.jit
 def _unfold2d(
@@ -273,7 +285,17 @@ def _unfold2d(
 
 @triton.autotune(
     configs=_get_configs(ndim=3),
-    key=["x_block_dim", "x_size"],
+    key=[
+        "x_block_dim",
+        "x_size",
+        "x_stride",
+        "y_block_dim",
+        "y_size",
+        "y_stride",
+        "z_block_dim",
+        "z_size",
+        "z_stride",
+    ],
 )
 @triton.jit
 def _unfold3d(
@@ -294,6 +316,7 @@ def _unfold3d(
     # Number of blocks per grid pid
     x_blocks_per_grid: int,
 ):
+    """TODO: Not finished"""
     pid_0 = tl.program_id(0)
     # Batch index, Block index
     NBx = pid_0 * x_blocks_per_grid
@@ -355,15 +378,11 @@ def _unfold_torch(
             )
             out_idx = (batch, *blk)
             in_idx = (batch, *blk_slc)
-            if mask is not None:
-                out[out_idx] = x[in_idx][mask]
-            else:
-                out[out_idx] = x[in_idx]
+            out[out_idx] = x[in_idx]
     return out
 
 
-### Helper Functions ###
-def prep_shapes(
+def prep_unfold_shapes(
     x,
     block_size: tuple,
     stride: Optional[tuple] = None,
@@ -411,35 +430,3 @@ def prep_shapes(
         "mask": mask,
         "block_size": block_size,
     }
-
-
-def get_nblocks(
-    im_size: tuple[int, ...],
-    block_size: tuple[int, ...],
-    block_stride: Optional[tuple[int, ...]] = None,
-) -> tuple[int, ...]:
-    """Given an image and a block size, returns the number of valid blocks in each direction.
-
-    Blocks may overlap
-
-    Examples
-    --------
-    >>> get_nblocks((5, 5), (3, 3), (1, 1))
-    (3, 3)
-    >>> get_nblocks((5, 5), (3, 3), (2, 2))
-    (2, 2)
-    >>> get_nblocks((6, 6), (3, 3), (2, 2))
-    (2, 2)
-    >>> get_nblocks((7, 7), (3, 3), (2, 2))
-    (3, 3)
-    >>> get_nblocks((10, 10), (8, 8), (4, 4))
-    (1, 1)
-    """
-    assert len(im_size) == len(
-        block_size
-    ), f"im_size {im_size} and block_size {block_size} don't match"
-    block_stride = block_stride if block_stride is not None else (1,) * len(block_size)
-    output = tuple(
-        (im - bl) // st + 1 for im, bl, st in zip(im_size, block_size, block_stride)
-    )
-    return output

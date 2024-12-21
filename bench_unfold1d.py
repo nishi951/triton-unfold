@@ -20,6 +20,7 @@ def main():
 
     mask = torch.zeros(*block_dim, dtype=bool)
     mask[::2] = 1
+    mask = None
 
     dtype = torch.complex64
     cp_dtype = np.float32
@@ -62,8 +63,8 @@ def main():
     # Test correctness
     x = torch.randn((N, Nx), device=device)
     Bx_triton = unfold(x, block_dim, stride, mask)
-    # Bx_sp = sp.array_to_blocks(from_pytorch(x), block_dim, stride)
-    # assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
+    Bx_sp = sp.array_to_blocks(from_pytorch(x), block_dim, stride)
+    assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
     breakpoint()
 
 
