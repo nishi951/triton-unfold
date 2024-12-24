@@ -24,6 +24,7 @@ def unfold(
     x_flat, shapes = prep_unfold_shapes(x, block_size, stride, mask)
     if torch.is_complex(x_flat):
         x_flat = torch.view_as_real(x_flat)
+        x_flat = torch.flatten(x_flat, -2, -1)  # Flatten real/imag into last dim
         y_flat = _unfold(x_flat, **shapes)
         y = y_flat.reshape(
             *shapes["batch_shape"],
@@ -85,7 +86,7 @@ def _unfold(
                 *BLOCK_SIZE,
             )
     else:
-        y = _unfold_torch(x, **shapes)
+        y = _unfold_torch(x, block_size, stride, ndim, im_size, nblocks, nbatch)
     return y
 
 
@@ -289,12 +290,12 @@ def _unfold2d(
         "x_block_dim",
         "x_size",
         "x_stride",
-        "y_block_dim",
-        "y_size",
-        "y_stride",
-        "z_block_dim",
-        "z_size",
-        "z_stride",
+        # "y_block_dim",
+        # "y_size",
+        # "y_stride",
+        # "z_block_dim",
+        # "z_size",
+        # "z_stride",
     ],
 )
 @triton.jit
@@ -356,7 +357,7 @@ def _unfold3d(
 UNFOLD = {1: _unfold1d, 2: _unfold2d}
 
 
-@torch.compile
+# @torch.compile
 def _unfold_torch(
     x: Float[Tensor, "B ..."],
     block_size: tuple[int, ...],
@@ -365,7 +366,6 @@ def _unfold_torch(
     im_size: tuple[int, ...],
     nblocks: tuple[int, ...],
     nbatch: int,
-    mask: Bool[Tensor, "..."],
 ) -> Float[Tensor, "B I ..."]:
     """Fallback option"""
     out = torch.zeros((nbatch, *nblocks, *block_size), device=x.device, dtype=x.dtype)
@@ -392,14 +392,15 @@ def prep_unfold_shapes(
     ndim = len(block_size)
     im_size = x.shape[-ndim:]
     stride = stride if stride is not None else (1,) * ndim
+    nblocks = get_nblocks(im_size, block_size, stride)
 
     if torch.is_complex(x):
+        im_size = list(im_size)
+        im_size[-1] *= 2
         block_size = list(block_size)
         block_size[-1] *= 2
         stride = list(stride)
         stride[-1] *= 2
-
-    nblocks = get_nblocks(im_size, block_size, stride)
 
     # Add or infer batch dim
     batch_shape = x.shape[:-ndim]

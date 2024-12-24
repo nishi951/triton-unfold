@@ -78,7 +78,7 @@ def _fold(
                 *block_size,
                 *im_size,
                 *stride,
-                *(8,),
+                #    *(8,),
             )
     else:
         y = _fold_torch(x)
@@ -124,10 +124,10 @@ def _bsz2dict(*bsz):
     return out
 
 
-# @triton.autotune(
-#     configs=_get_configs(ndim=1),
-#     key=["x_block_dim", "x_size", "x_stride"],
-# )
+@triton.autotune(
+    configs=_get_configs(ndim=1),
+    key=["x_block_dim", "x_size", "x_stride"],
+)
 @triton.jit
 def _fold1d(
     in_ptr,

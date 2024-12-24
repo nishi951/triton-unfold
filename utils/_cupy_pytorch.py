@@ -81,7 +81,7 @@ def from_pytorch(tensor):  # pragma: no cover
         output = tensor.detach().contiguous().numpy()
     else:
         if cupy_enabled:
-            output = cp.fromDlpack(to_dlpack(tensor.contiguous()))
+            output = cp.from_dlpack(to_dlpack(tensor.contiguous()))
         else:
             raise TypeError(
                 "CuPy not installed, " "but trying to convert GPU PyTorch Tensor."
