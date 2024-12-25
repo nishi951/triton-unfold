@@ -237,7 +237,6 @@ def _unfold2d(
     pid_0 = tl.program_id(0)
     pid_1 = tl.program_id(1)
     # Batch index, Block index
-    N = 0
     NBx = pid_0 * x_blocks_per_grid
     N, Bx = NBx // x_nblocks, NBx % x_nblocks
     By = pid_1 * y_blocks_per_grid
@@ -246,9 +245,6 @@ def _unfold2d(
     in_size = x_size * y_size
     nblocks = x_nblocks * y_nblocks
     block_dim = x_block_dim * y_block_dim
-
-    # Get block from input
-    # in_offset = N * in_size + Bx * x_stride * y_size + By * y_stride
 
     in_blk_ptr = tl.make_block_ptr(
         in_ptr,
@@ -290,12 +286,12 @@ def _unfold2d(
         "x_block_dim",
         "x_size",
         "x_stride",
-        # "y_block_dim",
-        # "y_size",
-        # "y_stride",
-        # "z_block_dim",
-        # "z_size",
-        # "z_stride",
+        "y_block_dim",
+        "y_size",
+        "y_stride",
+        "z_block_dim",
+        "z_size",
+        "z_stride",
     ],
 )
 @triton.jit
@@ -306,58 +302,99 @@ def _unfold3d(
     nbatch: int,
     # Number of blocks
     x_nblocks: int,
+    y_nblocks: int,
+    z_nblocks: int,
     # Size of each block
     x_block_dim: int,
+    y_block_dim: int,
+    z_block_dim: int,
     # Size of the input data
     x_size: int,
+    y_size: int,
+    z_size: int,
     # Stride of the blocks
     x_stride: int,
+    y_stride: int,
+    z_stride: int,
     # Size of the triton block (power of 2)
     X_BLOCK_SIZE: tl.constexpr,
+    Y_BLOCK_SIZE: tl.constexpr,
+    Z_BLOCK_SIZE: tl.constexpr,
     # Number of blocks per grid pid
     x_blocks_per_grid: int,
+    y_blocks_per_grid: int,
+    z_blocks_per_grid: int,
 ):
-    """TODO: Not finished"""
+    """"""
     pid_0 = tl.program_id(0)
+    pid_1 = tl.program_id(1)
+    pid_2 = tl.program_id(2)
     # Batch index, Block index
     NBx = pid_0 * x_blocks_per_grid
     N, Bx = NBx // x_nblocks, NBx % x_nblocks
+    By = pid_1 * y_blocks_per_grid
+    Bz = pid_2 * z_blocks_per_grid
 
-    # Get block from input
-    # x_load_range = tl.arange(0, X_BLOCK_SIZE)
-    # x_load_mask = x_load_range < x_size
-    # load_range = x_load_range
-    # load_mask = x_load_mask
-    # size = x_size
-    in_offset = N * x_size + Bx * x_stride
+    # global sizes
+    in_size = x_size * y_size * z_size
+    nblocks = x_nblocks * y_nblocks * z_nblocks
+    block_dim = x_block_dim * y_block_dim * z_block_dim
 
     in_blk_ptr = tl.make_block_ptr(
-        in_ptr + in_offset,
-        shape=(nbatch, x_size),
-        strides=(1, 1),
-        offsets=(0, 0),
-        block_shape=(1, X_BLOCK_SIZE),
-        order=(0, 1),
+        in_ptr,
+        shape=(nbatch, x_size, y_size, z_size),
+        strides=(in_size, y_size * z_size, z_size, 1),
+        offsets=(N, Bx * x_stride, By * y_stride, Bz * z_stride),
+        block_shape=(1, X_BLOCK_SIZE, Y_BLOCK_SIZE, Z_BLOCK_SIZE),
+        order=(0, 1, 2, 3),
     )
-    blk_range = tl.arange(0, X_BLOCK_SIZE)
-    blk_mask = blk_range < x_block_dim
-    # out_offset = N * x_nblocks * x_block_dim + Bx * x_block_dim
+    x_range = tl.arange(0, X_BLOCK_SIZE)
+    y_range = tl.arange(0, Y_BLOCK_SIZE)
+    z_range = tl.arange(0, Z_BLOCK_SIZE)
+    x_mask = x_range < x_block_dim
+    y_mask = y_range < y_block_dim
+    z_mask = z_range < z_block_dim
+
+    blk_range = (
+        x_range[:, None, None] * y_block_dim + y_range[None, :, None]
+    ) * z_block_dim + z_range[None, None, :]
+    blk_mask = x_mask[:, None, None] & (y_mask[None, :, None] & z_mask[None, None, :])
+
+    out_range = blk_range[None, :, :, :]
+    out_mask = blk_mask[None, :, :, :]
 
     for i in range(x_blocks_per_grid):
         if Bx + i < x_nblocks:
-            blk = tl.load(in_blk_ptr)
-            # Save block to output
-            out_offset = N * x_nblocks * x_block_dim + (Bx + i) * x_block_dim
-            out_range = blk_range[None, :]
-            out_mask = blk_mask[None, :]
-            tl.store(out_ptr + out_offset + out_range, blk, out_mask)
-        in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride))
+            x_blk_offset = (Bx + i) * y_nblocks * z_nblocks * block_dim
+            in_blk_ptr_x = in_blk_ptr
+            for j in range(y_blocks_per_grid):
+                if By + j < y_nblocks:
+                    y_blk_offset = (By + j) * z_nblocks * block_dim
+                    in_blk_ptr_y = in_blk_ptr
+                    for k in range(z_blocks_per_grid):
+                        if Bz + k < z_nblocks:
+                            z_blk_offset = (Bz + k) * block_dim
+                            in_blk_ptr_z = in_blk_ptr
+
+                            # Load/Store
+                            blk = tl.load(in_blk_ptr)
+                            out_offset = (
+                                N * nblocks * block_dim
+                                + x_blk_offset
+                                + y_blk_offset
+                                + z_blk_offset
+                            )
+                            tl.store(out_ptr + out_offset + out_range, blk, out_mask)
+                        in_blk_ptr = tl.advance(in_blk_ptr, (0, 0, 0, z_stride))
+                    in_blk_ptr = in_blk_ptr_y
+                in_blk_ptr = tl.advance(in_blk_ptr, (0, 0, y_stride, 0))
+            in_blk_ptr = in_blk_ptr_x
+        in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride, 0, 0))
 
 
-UNFOLD = {1: _unfold1d, 2: _unfold2d}
+UNFOLD = {1: _unfold1d, 2: _unfold2d, 3: _unfold3d}
 
 
-@torch.compile
 def _unfold_torch(
     x: Float[Tensor, "B ..."],
     block_size: tuple[int, ...],
@@ -367,7 +404,10 @@ def _unfold_torch(
     nblocks: tuple[int, ...],
     nbatch: int,
 ) -> Float[Tensor, "B I ..."]:
-    """Fallback option"""
+    """Fallback option
+
+    Note: Compile takes forever
+    """
     out = torch.zeros((nbatch, *nblocks, *block_size), device=x.device, dtype=x.dtype)
     # Python implementation
     for batch in range(nbatch):

@@ -296,15 +296,149 @@ def _fold2d(
     tl.store(out_ptr + out_offset + out_range, output, out_mask)
 
 
+@triton.autotune(
+    configs=_get_configs(ndim=3),
+    key=[
+        "x_block_dim",
+        "x_size",
+        "x_stride",
+        "y_block_dim",
+        "y_size",
+        "y_stride",
+        "z_block_dim",
+        "z_size",
+        "z_stride",
+    ],
+)
+@triton.jit
+def _fold3d(
+    in_ptr,
+    out_ptr,
+    # Number of batches
+    nbatch: int,
+    # Number of blocks
+    x_nblocks: int,
+    y_nblocks: int,
+    z_nblocks: int,
+    # Size of each block
+    x_block_dim: int,
+    y_block_dim: int,
+    z_block_dim: int,
+    # Size of the input data
+    x_size: int,
+    y_size: int,
+    z_size: int,
+    # Stride of the blocks
+    x_stride: int,
+    y_stride: int,
+    z_stride: int,
+    # Size of the triton block (power of 2)
+    X_BLOCK_SIZE: tl.constexpr,
+    Y_BLOCK_SIZE: tl.constexpr,
+    Z_BLOCK_SIZE: tl.constexpr,
+):
+    pid_0 = tl.program_id(0)
+    pid_1 = tl.program_id(1)
+    pid_1 = tl.program_id(2)
+    # x_blocks_per_batch = tl.ceil(x_size / X_BLOCK_SIZE)
+    x_blocks_per_batch = cdiv(x_size, X_BLOCK_SIZE)
+    y_blocks_per_batch = cdiv(y_size, Y_BLOCK_SIZE)
+    z_blocks_per_batch = cdiv(z_size, Z_BLOCK_SIZE)
+
+    # Batch index, Block index
+    N, Ix = pid_0 // x_blocks_per_batch, pid_0 % x_blocks_per_batch
+    Iy = pid_1 % y_blocks_per_batch
+    Iz = pid_2 % z_blocks_per_batch
+
+    nblocks = x_nblocks * y_nblocks * z_nblocks
+    block_dim = x_block_dim * y_block_dim * z_block_dim
+    size = x_size * y_size * z_size
+
+    in_offset = N * nblocks * block_dim
+
+    # Find overlapping blocks with range
+    x_lower = Ix * X_BLOCK_SIZE
+    x_upper = x_lower + X_BLOCK_SIZE
+    Bx_lower = cdiv(x_lower - x_block_dim + 1, x_stride)
+    Bx_upper = cdiv(x_upper, x_stride)  # non-inclusive
+    y_lower = Iy * Y_BLOCK_SIZE
+    y_upper = y_lower + Y_BLOCK_SIZE
+    By_lower = cdiv(y_lower - y_block_dim + 1, y_stride)
+    By_upper = cdiv(y_upper, y_stride)  # non-inclusive
+    z_lower = Iz * Z_BLOCK_SIZE
+    z_upper = z_lower + Z_BLOCK_SIZE
+    Bz_lower = cdiv(z_lower - z_block_dim + 1, z_stride)
+    Bz_upper = cdiv(z_upper, z_stride)  # non-inclusive
+
+    # Initialize output
+    output = tl.zeros((1, X_BLOCK_SIZE, Y_BLOCK_SIZE), tl.float32)
+    x_range = tl.arange(0, X_BLOCK_SIZE) + x_lower
+    x_mask = x_range < x_size
+    y_range = tl.arange(0, Y_BLOCK_SIZE) + y_lower
+    y_mask = y_range < y_size
+    z_range = tl.arange(0, Z_BLOCK_SIZE) + z_lower
+    z_mask = z_range < z_size
+
+    out_offset = N * size
+    out_range = (
+        x_range[:, None, None] * y_size + y_range[None, :, None]
+    ) * z_size + z_range[None, None, :]
+    out_mask = x_mask[:, None, None] & (y_mask[None, :, None] & z_mask[None, None, :])
+
+    out_range = out_range[None, :, :, :]
+    out_mask = out_mask[None, :, :, :]
+
+    for Bx in range(Bx_lower, Bx_upper):
+        if Bx >= 0 and Bx < x_nblocks:
+            x_Lpad = Bx * x_stride - x_lower
+            # Rpad = x_upper - Bx * x_stride + x_block_dim
+            x_in_range = tl.arange(0, X_BLOCK_SIZE)
+            x_in_mask = ((x_in_range - x_Lpad) >= 0) & (
+                (x_in_range - x_Lpad) < x_block_dim
+            )
+            for By in range(By_lower, By_upper):
+                if By >= 0 and By < y_nblocks:
+                    y_Lpad = By * y_stride - y_lower
+                    # Rpad = x_upper - Bx * x_stride + x_block_dim
+                    y_in_range = tl.arange(0, Y_BLOCK_SIZE)
+                    y_in_mask = ((y_in_range - y_Lpad) >= 0) & (
+                        (y_in_range - y_Lpad) < y_block_dim
+                    )
+                    for Bz in range(Bz_lower, Bz_upper):
+                        if Bz >= 0 and Bz < z_nblocks:
+                            z_in_range = tl.arange(0, Z_BLOCK_SIZE)
+                            z_in_mask = ((z_in_range - z_Lpad) >= 0) & (
+                                (z_in_range - z_Lpad) < z_block_dim
+                            )
+                            # Load block
+                            block_offset = (
+                                (Bx * y_nblocks + By) * z_nblocks + Bz
+                            ) * block_dim
+                            block_offset = block_offset - (
+                                (x_Lpad * y_block_dim + y_Lpad) * z_block_dim + z_Lpad
+                            )
+                            in_range = (
+                                x_in_range[:, None, None] * y_block_dim
+                                + y_in_range[None, :, None]
+                            ) * z_block_dim + z_in_range[None, None, :]
+                            in_mask = x_in_mask[:, None, None] & (
+                                y_in_mask[None, :, None] & z_in_mask[None, None, :]
+                            )
+                            blk = tl.load(
+                                in_ptr + in_offset + block_offset + in_range, in_mask
+                            )
+                            output += blk
+    tl.store(out_ptr + out_offset + out_range, output, out_mask)
+
+
 @triton.jit
 def cdiv(a, b):
     return tl.cast(tl.ceil(a / b), tl.int32)
 
 
-FOLD = {1: _fold1d, 2: _fold2d}
+FOLD = {1: _fold1d, 2: _fold2d, 3: _fold3d}
 
 
-# @torch.compile
 def _fold_torch(
     x: Shaped[Tensor, "B ..."],
     block_size: tuple[int, ...],
@@ -314,7 +448,10 @@ def _fold_torch(
     nblocks: tuple[int, ...],
     nbatch: int,
 ) -> Shaped[Tensor, "B I ..."]:
-    """Fallback option"""
+    """Fallback option
+
+    Note: Compile takes forever
+    """
     out = torch.zeros((nbatch, *im_size), device=x.device, dtype=x.dtype)
     # Python implementation
     for batch in range(nbatch):
