@@ -30,6 +30,9 @@ PYTEST_GPU_MARKS = [
         "small2d",
         "medium2d",
         pytest.param("large2d", marks=PYTEST_GPU_MARKS),
+        pytest.param("small3d", marks=PYTEST_GPU_MARKS),
+        pytest.param("medium3d", marks=PYTEST_GPU_MARKS),
+        pytest.param("large3d", marks=PYTEST_GPU_MARKS),
     ],
 )
 def test_fold(dev, dtype, spec, request):
@@ -47,7 +50,7 @@ def test_fold(dev, dtype, spec, request):
 
     x = x.to(device).to(dtype)
 
-    y_th = fold(x, spec["shape"], spec["block_size"], spec["stride"], spec.get("mask"))
+    y_th = fold(x, spec["shape"], spec["block_size"], spec["stride"])
 
     x = from_pytorch(x)
     y_sp = sp.blocks_to_array(x, oshape, spec["block_size"], spec["stride"])

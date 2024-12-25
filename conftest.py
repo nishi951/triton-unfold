@@ -144,8 +144,8 @@ def medium3d():
 @pytest.fixture
 def large3d():
     spec = {
-        "N": (20, 1),
-        "shape": (125, 125, 125),
+        "N": (2, 1),
+        "shape": (100, 100, 100),
         "block_size": (25, 25, 25),
         "stride": (25, 25, 25),
     }

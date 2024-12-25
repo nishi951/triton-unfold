@@ -114,7 +114,7 @@ def _get_grid(ndim: int, nbatch, nblocks: tuple[int, ...]):
 def _get_configs(ndim: int):
     warps = [1, 2]
     stages = [1, 2]
-    blocks_per_grid = [[2**i for i in range(4)] for _ in range(ndim)]
+    blocks_per_grid = [[2**i for i in range(3)] for _ in range(ndim)]
     bpg_iter = product(*blocks_per_grid)
     return [
         triton.Config(kwargs=_bpg2dict(*bpg), num_warps=warp, num_stages=stages)
@@ -280,19 +280,38 @@ def _unfold2d(
         in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride, 0))
 
 
-@triton.autotune(
-    configs=_get_configs(ndim=3),
-    key=[
-        "x_block_dim",
-        "x_size",
-        "x_stride",
-        "y_block_dim",
-        "y_size",
-        "y_stride",
-        "z_block_dim",
-        "z_size",
-        "z_stride",
-    ],
+# @triton.autotune(
+#     configs=_get_configs(ndim=3),
+#     key=[
+#         "x_block_dim",
+#         "x_size",
+#         "x_stride",
+#         "y_block_dim",
+#         "y_size",
+#         "y_stride",
+#         "z_block_dim",
+#         "z_size",
+#         "z_stride",
+#     ],
+# )
+
+
+MAX_GRID_PER_DIM = 1024
+
+
+@triton.heuristics(
+    values={
+        "x_blocks_per_grid": lambda args: max(
+            1, triton.cdiv(args["x_nblocks"], MAX_GRID_PER_DIM)
+        ),
+        "y_blocks_per_grid": lambda args: max(
+            1, triton.cdiv(args["y_nblocks"], MAX_GRID_PER_DIM)
+        ),
+        "z_blocks_per_grid": lambda args: max(
+            1, triton.cdiv(args["z_nblocks"], MAX_GRID_PER_DIM)
+        ),
+        "num_warps": 1,
+    },
 )
 @triton.jit
 def _unfold3d(

@@ -174,8 +174,8 @@ def _fold1d(
     out_range = x_range
     out_mask = x_mask
 
-    out_range = out_range[None, :]
-    out_mask = out_mask[None, :]
+    out_range = out_range[None]
+    out_mask = out_mask[None]
     # pdb.set_trace()
 
     for Bx in range(Bx_lower, Bx_upper):
@@ -267,8 +267,8 @@ def _fold2d(
     out_range = x_range[:, None] * y_size + y_range[None, :]
     out_mask = x_mask[:, None] & y_mask[None, :]
 
-    out_range = out_range[None, :]
-    out_mask = out_mask[None, :]
+    out_range = out_range[None]
+    out_mask = out_mask[None]
 
     for Bx in range(Bx_lower, Bx_upper):
         if Bx >= 0 and Bx < x_nblocks:
@@ -296,19 +296,56 @@ def _fold2d(
     tl.store(out_ptr + out_offset + out_range, output, out_mask)
 
 
-@triton.autotune(
-    configs=_get_configs(ndim=3),
-    key=[
-        "x_block_dim",
-        "x_size",
-        "x_stride",
-        "y_block_dim",
-        "y_size",
-        "y_stride",
-        "z_block_dim",
-        "z_size",
-        "z_stride",
-    ],
+# @triton.autotune(
+#     configs=_get_configs(ndim=3),
+#     key=[
+#         "x_block_dim",
+#         "x_size",
+#         "x_stride",
+#         "y_block_dim",
+#         "y_size",
+#         "y_stride",
+#         "z_block_dim",
+#         "z_size",
+#         "z_stride",
+#     ],
+# )
+# MAX_GRID_PER_DIM = 1024
+
+
+# @triton.autotune(
+#     configs=_get_configs(ndim=3),
+#     key=[
+#         "x_block_dim",
+#         "x_size",
+#         "x_stride",
+#         "y_block_dim",
+#         "y_size",
+#         "y_stride",
+#         "z_block_dim",
+#         "z_size",
+#         "z_stride",
+#     ],
+# )
+# MAX_3D_BLOCK_SIZE = 2**6
+MAX_3D_BLOCK_SIZE = 2**6
+
+
+@triton.heuristics(
+    values={
+        "X_BLOCK_SIZE": lambda args: min(
+            MAX_3D_BLOCK_SIZE,
+            triton.next_power_of_2(args["x_stride"]),
+        ),
+        "Y_BLOCK_SIZE": lambda args: min(
+            MAX_3D_BLOCK_SIZE,
+            triton.next_power_of_2(args["y_stride"]),
+        ),
+        "Z_BLOCK_SIZE": lambda args: min(
+            MAX_3D_BLOCK_SIZE,
+            triton.next_power_of_2(args["z_stride"]),
+        ),
+    },
 )
 @triton.jit
 def _fold3d(
@@ -339,7 +376,7 @@ def _fold3d(
 ):
     pid_0 = tl.program_id(0)
     pid_1 = tl.program_id(1)
-    pid_1 = tl.program_id(2)
+    pid_2 = tl.program_id(2)
     # x_blocks_per_batch = tl.ceil(x_size / X_BLOCK_SIZE)
     x_blocks_per_batch = cdiv(x_size, X_BLOCK_SIZE)
     y_blocks_per_batch = cdiv(y_size, Y_BLOCK_SIZE)
@@ -371,7 +408,7 @@ def _fold3d(
     Bz_upper = cdiv(z_upper, z_stride)  # non-inclusive
 
     # Initialize output
-    output = tl.zeros((1, X_BLOCK_SIZE, Y_BLOCK_SIZE), tl.float32)
+    output = tl.zeros((1, X_BLOCK_SIZE, Y_BLOCK_SIZE, Z_BLOCK_SIZE), tl.float32)
     x_range = tl.arange(0, X_BLOCK_SIZE) + x_lower
     x_mask = x_range < x_size
     y_range = tl.arange(0, Y_BLOCK_SIZE) + y_lower
@@ -385,13 +422,12 @@ def _fold3d(
     ) * z_size + z_range[None, None, :]
     out_mask = x_mask[:, None, None] & (y_mask[None, :, None] & z_mask[None, None, :])
 
-    out_range = out_range[None, :, :, :]
-    out_mask = out_mask[None, :, :, :]
+    out_range = out_range[None]
+    out_mask = out_mask[None]
 
     for Bx in range(Bx_lower, Bx_upper):
         if Bx >= 0 and Bx < x_nblocks:
             x_Lpad = Bx * x_stride - x_lower
-            # Rpad = x_upper - Bx * x_stride + x_block_dim
             x_in_range = tl.arange(0, X_BLOCK_SIZE)
             x_in_mask = ((x_in_range - x_Lpad) >= 0) & (
                 (x_in_range - x_Lpad) < x_block_dim
@@ -399,13 +435,13 @@ def _fold3d(
             for By in range(By_lower, By_upper):
                 if By >= 0 and By < y_nblocks:
                     y_Lpad = By * y_stride - y_lower
-                    # Rpad = x_upper - Bx * x_stride + x_block_dim
                     y_in_range = tl.arange(0, Y_BLOCK_SIZE)
                     y_in_mask = ((y_in_range - y_Lpad) >= 0) & (
                         (y_in_range - y_Lpad) < y_block_dim
                     )
                     for Bz in range(Bz_lower, Bz_upper):
                         if Bz >= 0 and Bz < z_nblocks:
+                            z_Lpad = Bz * z_stride - z_lower
                             z_in_range = tl.arange(0, Z_BLOCK_SIZE)
                             z_in_mask = ((z_in_range - z_Lpad) >= 0) & (
                                 (z_in_range - z_Lpad) < z_block_dim
