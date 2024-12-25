@@ -125,9 +125,20 @@ def _bsz2dict(*bsz):
     return out
 
 
-@triton.autotune(
-    configs=_get_configs(ndim=1),
-    key=["x_block_dim", "x_size", "x_stride"],
+# @triton.autotune(
+#     configs=_get_configs(ndim=1),
+#     key=["x_block_dim", "x_size", "x_stride"],
+# )
+MAX_1D_BLOCK_SIZE = 2**20
+
+
+@triton.heuristics(
+    values={
+        "X_BLOCK_SIZE": lambda args: min(
+            MAX_1D_BLOCK_SIZE,
+            triton.next_power_of_2(args["x_stride"]),
+        ),
+    },
 )
 @triton.jit
 def _fold1d(
@@ -197,16 +208,31 @@ def _fold1d(
     tl.store(out_ptr + out_offset + out_range, output, out_mask)
 
 
-@triton.autotune(
-    configs=_get_configs(ndim=2),
-    key=[
-        "x_block_dim",
-        "x_size",
-        "x_stride",
-        "y_block_dim",
-        "y_size",
-        "y_stride",
-    ],
+# @triton.autotune(
+#     configs=_get_configs(ndim=2),
+#     key=[
+#         "x_block_dim",
+#         "x_size",
+#         "x_stride",
+#         "y_block_dim",
+#         "y_size",
+#         "y_stride",
+#     ],
+# )
+MAX_2D_BLOCK_SIZE = 2**10
+
+
+@triton.heuristics(
+    values={
+        "X_BLOCK_SIZE": lambda args: min(
+            MAX_2D_BLOCK_SIZE,
+            triton.next_power_of_2(args["x_stride"]),
+        ),
+        "Y_BLOCK_SIZE": lambda args: min(
+            MAX_2D_BLOCK_SIZE,
+            triton.next_power_of_2(args["y_stride"]),
+        ),
+    },
 )
 @triton.jit
 def _fold2d(
