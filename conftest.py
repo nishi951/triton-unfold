@@ -1,4 +1,5 @@
 import pytest
+import torch
 
 
 @pytest.fixture
@@ -8,6 +9,7 @@ def small1d():
         "shape": (15,),
         "block_size": (3,),
         "stride": (1,),
+        "mask": torch.tensor([0, 1, 0], dtype=bool),
     }
     return spec
 
@@ -52,6 +54,14 @@ def small2d():
         "shape": (15, 15),
         "block_size": (3, 3),
         "stride": (1, 1),
+        "mask": torch.tensor(
+            [
+                [0, 1, 0],
+                [1, 1, 1],
+                [0, 1, 0],
+            ],
+            dtype=bool,
+        ),
     }
     return spec
 
