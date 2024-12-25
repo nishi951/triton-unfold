@@ -58,7 +58,7 @@ def _unfold(
     **kwargs,
 ) -> Shaped[Tensor, "B ..."]:
     """Implementation of unfold"""
-    if x.is_cuda and ndim in (1, 2, 3):
+    if x.is_cuda and ndim in UNFOLD.keys():
         with torch.cuda.device(x.device):
             # Allocate output
             y = torch.zeros(
@@ -357,7 +357,7 @@ def _unfold3d(
 UNFOLD = {1: _unfold1d, 2: _unfold2d}
 
 
-# @torch.compile
+@torch.compile
 def _unfold_torch(
     x: Float[Tensor, "B ..."],
     block_size: tuple[int, ...],

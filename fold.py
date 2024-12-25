@@ -38,6 +38,7 @@ def fold(
 
     if torch.is_complex(x_flat):
         x_flat = torch.view_as_real(x_flat)
+        x_flat = torch.flatten(x_flat, -2, -1)  # Flatten real/imag into last dim
         y_flat = _fold(x_flat, **shapes)
         y = y_flat.reshape(*shapes["batch_shape"], *shapes["im_size"])
         y = y.reshape(*y.shape[:-1], y.shape[-1] // 2, 2)
@@ -59,7 +60,7 @@ def _fold(
     **kwargs,
 ):
     """Implementation of fold"""
-    if x.is_cuda and ndim in (1, 2, 3):
+    if x.is_cuda and ndim in FOLD.keys():
         with torch.cuda.device(x.device):
             # Allocate output
             y = torch.zeros(
@@ -81,7 +82,7 @@ def _fold(
                 #    *(8,),
             )
     else:
-        y = _fold_torch(x)
+        y = _fold_torch(x, block_size, stride, ndim, im_size, nblocks, nbatch)
     return y
 
 
@@ -179,16 +180,119 @@ def _fold1d(
 
     for Bx in range(Bx_lower, Bx_upper):
         if Bx >= 0 and Bx < x_nblocks:
-            Lpad = Bx * x_stride - x_lower
+            x_Lpad = Bx * x_stride - x_lower
             # Rpad = x_upper - Bx * x_stride + x_block_dim
-            x_in_range = tl.arange(0, X_BLOCK_SIZE) + Bx * x_block_dim
-            x_in_range = x_in_range - Lpad
-            x_in_mask = (x_in_range >= Bx * x_block_dim) & (
-                x_in_range < (Bx + 1) * x_block_dim
+            x_in_range = tl.arange(0, X_BLOCK_SIZE)
+            # x_in_range = x_in_range - x_Lpad
+            x_in_mask = ((x_in_range - x_Lpad) >= 0) & (
+                (x_in_range - x_Lpad) < x_block_dim
             )
-            x_in_mask = x_in_mask
-            blk = tl.load(in_ptr + in_offset + x_in_range, x_in_mask)
+            # Load block
+            block_offset = Bx * block_dim
+            block_offset = block_offset - x_Lpad
+            in_range = x_in_range
+            in_mask = x_in_mask
+            blk = tl.load(in_ptr + in_offset + block_offset + in_range, in_mask)
             output += blk
+    tl.store(out_ptr + out_offset + out_range, output, out_mask)
+
+
+@triton.autotune(
+    configs=_get_configs(ndim=2),
+    key=[
+        "x_block_dim",
+        "x_size",
+        "x_stride",
+        "y_block_dim",
+        "y_size",
+        "y_stride",
+    ],
+)
+@triton.jit
+def _fold2d(
+    in_ptr,
+    out_ptr,
+    # Number of batches
+    nbatch: int,
+    # Number of blocks
+    x_nblocks: int,
+    y_nblocks: int,
+    # Size of each block
+    x_block_dim: int,
+    y_block_dim: int,
+    # Size of the input data
+    x_size: int,
+    y_size: int,
+    # Stride of the blocks
+    x_stride: int,
+    y_stride: int,
+    # Size of the triton block (power of 2)
+    X_BLOCK_SIZE: tl.constexpr,
+    Y_BLOCK_SIZE: tl.constexpr,
+):
+    pid_0 = tl.program_id(0)
+    pid_1 = tl.program_id(1)
+    # x_blocks_per_batch = tl.ceil(x_size / X_BLOCK_SIZE)
+    x_blocks_per_batch = cdiv(x_size, X_BLOCK_SIZE)
+    y_blocks_per_batch = cdiv(y_size, Y_BLOCK_SIZE)
+
+    # Batch index, Block index
+    N, Ix = pid_0 // x_blocks_per_batch, pid_0 % x_blocks_per_batch
+    Iy = pid_1 % y_blocks_per_batch
+
+    nblocks = x_nblocks * y_nblocks
+    block_dim = x_block_dim * y_block_dim
+    size = x_size * y_size
+
+    in_offset = N * nblocks * block_dim
+
+    # Find overlapping blocks with range
+    x_lower = Ix * X_BLOCK_SIZE
+    x_upper = x_lower + X_BLOCK_SIZE
+    Bx_lower = cdiv(x_lower - x_block_dim + 1, x_stride)
+    Bx_upper = cdiv(x_upper, x_stride)  # non-inclusive
+    y_lower = Iy * Y_BLOCK_SIZE
+    y_upper = y_lower + Y_BLOCK_SIZE
+    By_lower = cdiv(y_lower - y_block_dim + 1, y_stride)
+    By_upper = cdiv(y_upper, y_stride)  # non-inclusive
+
+    # Initialize output
+    output = tl.zeros((1, X_BLOCK_SIZE, Y_BLOCK_SIZE), tl.float32)
+    x_range = tl.arange(0, X_BLOCK_SIZE) + x_lower
+    x_mask = x_range < x_size
+    y_range = tl.arange(0, Y_BLOCK_SIZE) + y_lower
+    y_mask = y_range < y_size
+
+    out_offset = N * size
+    out_range = x_range[:, None] * y_size + y_range[None, :]
+    out_mask = x_mask[:, None] & y_mask[None, :]
+
+    out_range = out_range[None, :]
+    out_mask = out_mask[None, :]
+
+    for Bx in range(Bx_lower, Bx_upper):
+        if Bx >= 0 and Bx < x_nblocks:
+            x_Lpad = Bx * x_stride - x_lower
+            # Rpad = x_upper - Bx * x_stride + x_block_dim
+            x_in_range = tl.arange(0, X_BLOCK_SIZE)
+            x_in_mask = ((x_in_range - x_Lpad) >= 0) & (
+                (x_in_range - x_Lpad) < x_block_dim
+            )
+            for By in range(By_lower, By_upper):
+                if By >= 0 and By < y_nblocks:
+                    y_Lpad = By * y_stride - y_lower
+                    # Rpad = x_upper - Bx * x_stride + x_block_dim
+                    y_in_range = tl.arange(0, Y_BLOCK_SIZE)
+                    y_in_mask = ((y_in_range - y_Lpad) >= 0) & (
+                        (y_in_range - y_Lpad) < y_block_dim
+                    )
+                    # Load block
+                    block_offset = Bx * y_nblocks * block_dim + By * block_dim
+                    block_offset = block_offset - (x_Lpad * y_block_dim + y_Lpad)
+                    in_range = x_in_range[:, None] * y_block_dim + y_in_range[None, :]
+                    in_mask = x_in_mask[:, None] & y_in_mask[None, :]
+                    blk = tl.load(in_ptr + in_offset + block_offset + in_range, in_mask)
+                    output += blk
     tl.store(out_ptr + out_offset + out_range, output, out_mask)
 
 
@@ -197,10 +301,10 @@ def cdiv(a, b):
     return tl.cast(tl.ceil(a / b), tl.int32)
 
 
-FOLD = {1: _fold1d}
+FOLD = {1: _fold1d, 2: _fold2d}
 
 
-@torch.compile
+# @torch.compile
 def _fold_torch(
     x: Shaped[Tensor, "B ..."],
     block_size: tuple[int, ...],
@@ -209,7 +313,6 @@ def _fold_torch(
     im_size: tuple[int, ...],
     nblocks: tuple[int, ...],
     nbatch: int,
-    mask: Bool[Tensor, "..."],
 ) -> Shaped[Tensor, "B I ..."]:
     """Fallback option"""
     out = torch.zeros((nbatch, *im_size), device=x.device, dtype=x.dtype)
@@ -229,12 +332,14 @@ def _fold_torch(
 def prep_fold_shapes(x, im_size, block_size, stride, mask):
     ndim = len(block_size)
     stride = stride if stride is not None else (1,) * ndim
+    nblocks = get_nblocks(im_size, block_size, stride)
     if torch.is_complex(x):
+        im_size = list(im_size)
+        im_size[-1] *= 2
         block_size = list(block_size)
         block_size[-1] *= 2
         stride = list(stride)
         stride[-1] *= 2
-    nblocks = get_nblocks(im_size, block_size, stride)
 
     # Add or infer batch dim
     batch_shape = x.shape[: (-2 * ndim)]

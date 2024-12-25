@@ -1,0 +1,78 @@
+import pytest
+
+
+@pytest.fixture
+def small1d():
+    spec = {
+        "N": (1,),
+        "shape": (15,),
+        "block_size": (3,),
+        "stride": (1,),
+    }
+    return spec
+
+
+@pytest.fixture
+def medium1d():
+    spec = {
+        "N": (2, 2),
+        "shape": (33,),
+        "block_size": (7,),
+        "stride": (2,),
+    }
+    return spec
+
+
+@pytest.fixture
+def large1d():
+    spec = {
+        "N": (20, 1),
+        "shape": (1025,),
+        "block_size": (25,),
+        "stride": (25,),
+    }
+    return spec
+
+
+@pytest.fixture
+def tiny2d():
+    spec = {
+        "N": (1,),
+        "shape": (4, 4),
+        "block_size": (2, 2),
+        "stride": (1, 1),
+    }
+    return spec
+
+
+@pytest.fixture
+def small2d():
+    spec = {
+        "N": (1,),
+        "shape": (15, 15),
+        "block_size": (3, 3),
+        "stride": (1, 1),
+    }
+    return spec
+
+
+@pytest.fixture
+def medium2d():
+    spec = {
+        "N": (2, 2),
+        "shape": (33, 43),
+        "block_size": (7, 7),
+        "stride": (2, 2),
+    }
+    return spec
+
+
+@pytest.fixture
+def large2d():
+    spec = {
+        "N": (20, 1),
+        "shape": (125, 125),
+        "block_size": (25, 25),
+        "stride": (25, 25),
+    }
+    return spec
