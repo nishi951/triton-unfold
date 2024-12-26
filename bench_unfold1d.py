@@ -18,8 +18,8 @@ def main():
     block_dim = (12,)
     stride = (1,)
 
-    mask = torch.zeros(*block_dim, dtype=bool)
-    mask[::2] = 1
+    # mask = torch.zeros(*block_dim, dtype=bool)
+    # mask[::2] = 1
     mask = None
 
     dtype = torch.complex64
@@ -65,7 +65,6 @@ def main():
     Bx_triton = unfold(x, block_dim, stride, mask)
     Bx_sp = sp.array_to_blocks(from_pytorch(x), block_dim, stride)
     assert torch.allclose(Bx_triton, to_pytorch(Bx_sp))
-    breakpoint()
 
 
 def summarize(benchmark_result, name: str):
