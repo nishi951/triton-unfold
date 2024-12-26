@@ -57,8 +57,6 @@ def _unfold(
     im_size: tuple[int, ...],
     nblocks: tuple[int, ...],
     nbatch: int,
-    # batch_shape: tuple[int, ...],
-    # mask: Bool[Tensor, "..."],
     **kwargs,
 ) -> Shaped[Tensor, "B ..."]:
     """Implementation of unfold"""
@@ -76,9 +74,6 @@ def _unfold(
             BLOCK_SIZE = tuple(
                 triton.next_power_of_2(blk_size) for blk_size in block_size
             )
-            # DEBUG
-            # grid = (nblocks[0], nblocks[1])
-
             UNFOLD[ndim][grid](
                 x,
                 y,
@@ -115,28 +110,6 @@ def _get_grid(ndim: int, nbatch, nblocks: tuple[int, ...]):
     return grid
 
 
-# def _get_configs(ndim: int):
-#     warps = [1, 2]
-#     stages = [1, 2]
-#     blocks_per_grid = [[2**i for i in range(3)] for _ in range(ndim)]
-#     bpg_iter = product(*blocks_per_grid)
-#     return [
-#         triton.Config(kwargs=_bpg2dict(*bpg), num_warps=warp, num_stages=stages)
-#         for (bpg, warp, stages) in product(bpg_iter, warps, stages)
-#     ]
-
-
-# def _bpg2dict(*bpg):
-#     out = {}
-#     for b, n in zip(bpg, ["x", "y", "z"][: len(bpg)]):
-#         out[f"{n}_blocks_per_grid"] = b
-#     return out
-
-
-# @triton.autotune(
-#     configs=_get_configs(ndim=1),
-#     key=["x_block_dim", "x_size", "x_stride"],
-# )
 @triton.heuristics(
     values={
         "x_blocks_per_grid": lambda args: max(
@@ -175,13 +148,6 @@ def _unfold1d(
     in_size = x_size
     nblocks = x_nblocks
     block_dim = x_block_dim
-    # Get block from input
-    # x_load_range = tl.arange(0, X_BLOCK_SIZE)
-    # x_load_mask = x_load_range < x_size
-    # load_range = x_load_range
-    # load_mask = x_load_mask
-    # size = x_size
-    # in_offset = N * x_size + Bx * x_stride
 
     in_blk_ptr = tl.make_block_ptr(
         in_ptr,
@@ -195,7 +161,6 @@ def _unfold1d(
     x_mask = x_range < x_block_dim
     blk_range = x_range
     blk_mask = x_mask
-    # out_offset = N * x_nblocks * x_block_dim + Bx * x_block_dim
 
     out_range = blk_range[None, :]
     out_mask = blk_mask[None, :]
@@ -209,17 +174,6 @@ def _unfold1d(
         in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride))
 
 
-# @triton.autotune(
-#     configs=_get_configs(ndim=2),
-#     key=[
-#         "x_block_dim",
-#         "x_size",
-#         "x_stride",
-#         "y_block_dim",
-#         "y_size",
-#         "y_stride",
-#     ],
-# )
 @triton.heuristics(
     values={
         "x_blocks_per_grid": lambda args: max(
@@ -299,22 +253,6 @@ def _unfold2d(
                 in_blk_ptr = tl.advance(in_blk_ptr, (0, 0, y_stride))
             in_blk_ptr = in_blk_ptr_x
         in_blk_ptr = tl.advance(in_blk_ptr, (0, x_stride, 0))
-
-
-# @triton.autotune(
-#     configs=_get_configs(ndim=3),
-#     key=[
-#         "x_block_dim",
-#         "x_size",
-#         "x_stride",
-#         "y_block_dim",
-#         "y_size",
-#         "y_stride",
-#         "z_block_dim",
-#         "z_size",
-#         "z_stride",
-#     ],
-# )
 
 
 @triton.heuristics(
@@ -488,13 +426,6 @@ def prep_unfold_shapes(
 
     # Handle mask
     if mask is not None:
-        # if torch.is_complex(x):
-        #     mask = torch.repeat_interleave(mask, repeats=2, dim=-1).contiguous()
-        # if block_size != mask.shape:
-        #     raise ValueError(
-        #         f"Mask must have same shape as blocks but got mask: {mask.shape} and block_size: {block_size}"
-        #     )
-        # block_size = (int(torch.sum(mask).item()),)
         mask = mask.to(x.device)
 
     return x_flat, {

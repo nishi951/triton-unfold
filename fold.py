@@ -15,6 +15,12 @@ import pdb
 
 __all__ = ["fold"]
 
+# Maximum block sizes in each direction
+# Determined by CUDA
+MAX_1D_BLOCK_SIZE = 2**20
+MAX_2D_BLOCK_SIZE = 2**10
+MAX_3D_BLOCK_SIZE = 2**6
+
 
 def fold(
     x,
@@ -79,7 +85,6 @@ def _fold(
                 *block_size,
                 *im_size,
                 *stride,
-                #    *(8,),
             )
     else:
         y = _fold_torch(x, block_size, stride, ndim, im_size, nblocks, nbatch)
@@ -105,31 +110,6 @@ def _get_grid(ndim: int, nbatch, im_size):
     else:
         raise ValueError(f"Invalid ndim = {ndim}")
     return grid
-
-
-def _get_configs(ndim: int):
-    warps = [1, 2]
-    stages = [1, 2]
-    block_sizes = [[2**i for i in range(8)] for _ in range(ndim)]
-    bsz_iter = product(*block_sizes)
-    return [
-        triton.Config(kwargs=_bsz2dict(*bsz), num_warps=warp, num_stages=stages)
-        for (bsz, warp, stages) in product(bsz_iter, warps, stages)
-    ]
-
-
-def _bsz2dict(*bsz):
-    out = {}
-    for b, n in zip(bsz, ["X", "Y", "Z"][: len(bsz)]):
-        out[f"{n}_BLOCK_SIZE"] = b
-    return out
-
-
-# @triton.autotune(
-#     configs=_get_configs(ndim=1),
-#     key=["x_block_dim", "x_size", "x_stride"],
-# )
-MAX_1D_BLOCK_SIZE = 2**20
 
 
 @triton.heuristics(
@@ -158,12 +138,10 @@ def _fold1d(
     X_BLOCK_SIZE: tl.constexpr,
 ):
     pid_0 = tl.program_id(0)
-    # x_blocks_per_batch = tl.ceil(x_size / X_BLOCK_SIZE)
     x_blocks_per_batch = cdiv(x_size, X_BLOCK_SIZE)
 
     # Batch index, Block index
     N, Ix = pid_0 // x_blocks_per_batch, pid_0 % x_blocks_per_batch
-    # N = pid_0 // x_blocks_per_batch
 
     nblocks = x_nblocks
     block_dim = x_block_dim
@@ -187,14 +165,11 @@ def _fold1d(
 
     out_range = out_range[None]
     out_mask = out_mask[None]
-    # pdb.set_trace()
 
     for Bx in range(Bx_lower, Bx_upper):
         if Bx >= 0 and Bx < x_nblocks:
             x_Lpad = Bx * x_stride - x_lower
-            # Rpad = x_upper - Bx * x_stride + x_block_dim
             x_in_range = tl.arange(0, X_BLOCK_SIZE)
-            # x_in_range = x_in_range - x_Lpad
             x_in_mask = ((x_in_range - x_Lpad) >= 0) & (
                 (x_in_range - x_Lpad) < x_block_dim
             )
@@ -206,20 +181,6 @@ def _fold1d(
             blk = tl.load(in_ptr + in_offset + block_offset + in_range, in_mask)
             output += blk
     tl.store(out_ptr + out_offset + out_range, output, out_mask)
-
-
-# @triton.autotune(
-#     configs=_get_configs(ndim=2),
-#     key=[
-#         "x_block_dim",
-#         "x_size",
-#         "x_stride",
-#         "y_block_dim",
-#         "y_size",
-#         "y_stride",
-#     ],
-# )
-MAX_2D_BLOCK_SIZE = 2**10
 
 
 @triton.heuristics(
@@ -269,7 +230,6 @@ def _fold2d(
     nblocks = x_nblocks * y_nblocks
     block_dim = x_block_dim * y_block_dim
     size = x_size * y_size
-
     in_offset = N * nblocks * block_dim
 
     # Find overlapping blocks with range
@@ -299,7 +259,6 @@ def _fold2d(
     for Bx in range(Bx_lower, Bx_upper):
         if Bx >= 0 and Bx < x_nblocks:
             x_Lpad = Bx * x_stride - x_lower
-            # Rpad = x_upper - Bx * x_stride + x_block_dim
             x_in_range = tl.arange(0, X_BLOCK_SIZE)
             x_in_mask = ((x_in_range - x_Lpad) >= 0) & (
                 (x_in_range - x_Lpad) < x_block_dim
@@ -307,7 +266,6 @@ def _fold2d(
             for By in range(By_lower, By_upper):
                 if By >= 0 and By < y_nblocks:
                     y_Lpad = By * y_stride - y_lower
-                    # Rpad = x_upper - Bx * x_stride + x_block_dim
                     y_in_range = tl.arange(0, Y_BLOCK_SIZE)
                     y_in_mask = ((y_in_range - y_Lpad) >= 0) & (
                         (y_in_range - y_Lpad) < y_block_dim
@@ -320,41 +278,6 @@ def _fold2d(
                     blk = tl.load(in_ptr + in_offset + block_offset + in_range, in_mask)
                     output += blk
     tl.store(out_ptr + out_offset + out_range, output, out_mask)
-
-
-# @triton.autotune(
-#     configs=_get_configs(ndim=3),
-#     key=[
-#         "x_block_dim",
-#         "x_size",
-#         "x_stride",
-#         "y_block_dim",
-#         "y_size",
-#         "y_stride",
-#         "z_block_dim",
-#         "z_size",
-#         "z_stride",
-#     ],
-# )
-# MAX_GRID_PER_DIM = 1024
-
-
-# @triton.autotune(
-#     configs=_get_configs(ndim=3),
-#     key=[
-#         "x_block_dim",
-#         "x_size",
-#         "x_stride",
-#         "y_block_dim",
-#         "y_size",
-#         "y_stride",
-#         "z_block_dim",
-#         "z_size",
-#         "z_stride",
-#     ],
-# )
-# MAX_3D_BLOCK_SIZE = 2**6
-MAX_3D_BLOCK_SIZE = 2**6
 
 
 @triton.heuristics(
@@ -403,7 +326,6 @@ def _fold3d(
     pid_0 = tl.program_id(0)
     pid_1 = tl.program_id(1)
     pid_2 = tl.program_id(2)
-    # x_blocks_per_batch = tl.ceil(x_size / X_BLOCK_SIZE)
     x_blocks_per_batch = cdiv(x_size, X_BLOCK_SIZE)
     y_blocks_per_batch = cdiv(y_size, Y_BLOCK_SIZE)
     z_blocks_per_batch = cdiv(z_size, Z_BLOCK_SIZE)
